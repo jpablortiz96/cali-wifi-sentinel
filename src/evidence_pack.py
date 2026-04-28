@@ -98,6 +98,9 @@ def build_evidence_summary_table(results: dict[str, Any]) -> pd.DataFrame:
     citizen_recommendations = safe_to_dataframe(results.get("citizen_recommendations"))
     citizen_feedback = safe_to_dataframe(results.get("citizen_feedback"))
     digital_equity = safe_to_dataframe(results.get("digital_equity_proxy"))
+    social_roi_df = safe_to_dataframe(results.get("social_roi_scores"))
+    social_roi_recommendations = safe_to_dataframe(results.get("social_roi_recommendations"))
+    socioeconomic_validation = results.get("socioeconomic_validation", {})
     citizen_feedback_summary = results.get("citizen_feedback_summary", {})
     recommended_df, waiting_df, crew_summary = format_crew_plan_for_display(crew_plan)
 
@@ -187,6 +190,24 @@ def build_evidence_summary_table(results: dict[str, Any]) -> pd.DataFrame:
             "interpretacion": "Senales relativas de necesidad de mejora por zona." if not digital_equity.empty else "No hay proxy de equidad calculado.",
         },
         {
+            "categoria": "Impacto social",
+            "indicador": "Social ROI calculado",
+            "valor": int(len(social_roi_df)),
+            "interpretacion": "Cruce entre red, experiencia y contexto socioeconomico agregado." if not social_roi_df.empty else "No hay Social ROI calculado.",
+        },
+        {
+            "categoria": "Impacto social",
+            "indicador": "Recomendaciones de retorno social",
+            "valor": int(len(social_roi_recommendations)),
+            "interpretacion": "Acciones sugeridas para inversión social y acompañamiento." if not social_roi_recommendations.empty else "No hay recomendaciones de retorno social disponibles.",
+        },
+        {
+            "categoria": "Impacto social",
+            "indicador": "Validación socioeconómica",
+            "valor": socioeconomic_validation.get("level", "Sin validar"),
+            "interpretacion": "Nivel geográfico detectado para el dataset socioeconómico.",
+        },
+        {
             "categoria": "Riesgo",
             "indicador": "Limitaciones registradas",
             "valor": len(limitations),
@@ -222,8 +243,12 @@ def build_readable_evidence_report(results: dict[str, Any]) -> str:
     citizen_recommendations_df = safe_to_dataframe(results.get("citizen_recommendations")).head(5)
     citizen_feedback_df = safe_to_dataframe(results.get("citizen_feedback")).head(5)
     digital_equity_df = safe_to_dataframe(results.get("digital_equity_proxy")).head(5)
+    social_roi_scores_df = safe_to_dataframe(results.get("social_roi_scores")).head(5)
+    social_roi_recommendations_df = safe_to_dataframe(results.get("social_roi_recommendations")).head(5)
     citizen_feedback_summary = results.get("citizen_feedback_summary", {})
     citizen_insights_markdown = str(results.get("citizen_insights_markdown", "") or "")
+    social_roi_explanation_markdown = str(results.get("social_roi_explanation_markdown", "") or "")
+    socioeconomic_validation = results.get("socioeconomic_validation", {})
     quality_summary, critical_df, warnings_df, recommendations_qg_df = format_quality_gate_for_display(
         quality_gate_report
     )
@@ -330,6 +355,17 @@ def build_readable_evidence_report(results: dict[str, Any]) -> str:
         "",
         "## 7.8. Analisis ciudadano con agente",
         citizen_insights_markdown or "- No hay analisis ciudadano generado todavia.",
+        "",
+        "## 7.9. Retorno Social de Conectividad",
+        f"- Nivel geografico socioeconomico: {socioeconomic_validation.get('level', 'Sin validar')}",
+        f"- Indicadores disponibles: {', '.join(socioeconomic_validation.get('available_indicators', [])) or 'Sin indicadores detectados'}",
+        _dataframe_preview_block(social_roi_scores_df, "No hay Social ROI calculado."),
+        "",
+        "## 7.10. Recomendaciones de retorno social",
+        _dataframe_preview_block(social_roi_recommendations_df, "No hay recomendaciones de retorno social disponibles."),
+        "",
+        "## 7.11. Explicacion de retorno social",
+        social_roi_explanation_markdown or "- No hay explicacion de retorno social generada todavia.",
         "",
     ]
     insert_index = next(
@@ -441,6 +477,18 @@ def create_evidence_files(results: dict[str, Any]) -> dict[str, str]:
         digital_equity_path.write_bytes(dataframe_to_csv_bytes(digital_equity))
         file_paths["digital_equity_proxy"] = str(digital_equity_path)
 
+    social_roi_scores = results.get("social_roi_scores")
+    if isinstance(social_roi_scores, pd.DataFrame) and not social_roi_scores.empty:
+        social_roi_scores_path = output_dir / "social_roi_scores.csv"
+        social_roi_scores_path.write_bytes(dataframe_to_csv_bytes(social_roi_scores))
+        file_paths["social_roi_scores"] = str(social_roi_scores_path)
+
+    social_roi_recommendations = results.get("social_roi_recommendations")
+    if isinstance(social_roi_recommendations, pd.DataFrame) and not social_roi_recommendations.empty:
+        social_roi_recommendations_path = output_dir / "social_roi_recommendations.csv"
+        social_roi_recommendations_path.write_bytes(dataframe_to_csv_bytes(social_roi_recommendations))
+        file_paths["social_roi_recommendations"] = str(social_roi_recommendations_path)
+
     operational_mart = results.get("operational_mart")
     if isinstance(operational_mart, pd.DataFrame) and not operational_mart.empty:
         operational_mart_path = output_dir / "operational_mart.csv"
@@ -490,6 +538,12 @@ def create_evidence_files(results: dict[str, Any]) -> dict[str, str]:
         quality_gate_path.write_bytes(dict_to_json_bytes(quality_gate_report))
         file_paths["quality_gate_report"] = str(quality_gate_path)
 
+    socioeconomic_validation = results.get("socioeconomic_validation")
+    if isinstance(socioeconomic_validation, dict) and socioeconomic_validation:
+        socioeconomic_validation_path = output_dir / "socioeconomic_validation.json"
+        socioeconomic_validation_path.write_bytes(dict_to_json_bytes(socioeconomic_validation))
+        file_paths["socioeconomic_validation"] = str(socioeconomic_validation_path)
+
     audit_log = results.get("operational_audit_log") or results.get("audit_log", [])
     if audit_log:
         audit_log_df = audit_log_to_dataframe(audit_log)
@@ -518,6 +572,12 @@ def create_evidence_files(results: dict[str, Any]) -> dict[str, str]:
         citizen_insights_path = output_dir / "citizen_insights.md"
         citizen_insights_path.write_text(str(citizen_insights_markdown), encoding="utf-8")
         file_paths["citizen_insights"] = str(citizen_insights_path)
+
+    social_roi_explanation_markdown = results.get("social_roi_explanation_markdown")
+    if social_roi_explanation_markdown:
+        social_roi_explanation_path = output_dir / "social_roi_explanation.md"
+        social_roi_explanation_path.write_text(str(social_roi_explanation_markdown), encoding="utf-8")
+        file_paths["social_roi_explanation"] = str(social_roi_explanation_path)
 
     evidence_summary_path = output_dir / "evidence_summary.csv"
     evidence_summary_path.write_bytes(dataframe_to_csv_bytes(evidence_summary_df))

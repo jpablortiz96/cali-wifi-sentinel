@@ -19,6 +19,10 @@ STANDARD_RESULT_KEYS = [
     "citizen_feedback_summary",
     "digital_equity_proxy",
     "citizen_insights_markdown",
+    "socioeconomic_validation",
+    "social_roi_scores",
+    "social_roi_recommendations",
+    "social_roi_explanation_markdown",
     "quality_gate_report",
     "replay_timeline",
     "human_review_log",
@@ -118,6 +122,10 @@ def normalize_results_for_dashboard(results: dict[str, object] | None) -> dict[s
         "citizen_feedback_summary": {},
         "digital_equity_proxy": pd.DataFrame(),
         "citizen_insights_markdown": "",
+        "socioeconomic_validation": {},
+        "social_roi_scores": pd.DataFrame(),
+        "social_roi_recommendations": pd.DataFrame(),
+        "social_roi_explanation_markdown": "",
         "quality_gate_report": {},
         "replay_timeline": pd.DataFrame(),
         "human_review_log": pd.DataFrame(),
@@ -168,6 +176,14 @@ def normalize_results_for_dashboard(results: dict[str, object] | None) -> dict[s
     )
     normalized["digital_equity_proxy"] = _safe_dataframe(payload.get("digital_equity_proxy"))
     normalized["citizen_insights_markdown"] = str(payload.get("citizen_insights_markdown", "") or "")
+    normalized["socioeconomic_validation"] = (
+        payload.get("socioeconomic_validation", {})
+        if isinstance(payload.get("socioeconomic_validation"), dict)
+        else {}
+    )
+    normalized["social_roi_scores"] = _safe_dataframe(payload.get("social_roi_scores"))
+    normalized["social_roi_recommendations"] = _safe_dataframe(payload.get("social_roi_recommendations"))
+    normalized["social_roi_explanation_markdown"] = str(payload.get("social_roi_explanation_markdown", "") or "")
     normalized["quality_gate_report"] = payload.get("quality_gate_report", {}) if isinstance(payload.get("quality_gate_report"), dict) else {}
     replay_timeline_value = _pick_first_non_none(
         payload.get("replay_timeline"),

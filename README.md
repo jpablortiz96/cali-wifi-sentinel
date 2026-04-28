@@ -735,3 +735,57 @@ Incluye:
 - El `Digital Equity Proxy` no usa población real y no debe interpretarse como brecha confirmada.
 - El calendario público usa caché y solo se consulta cuando el usuario activa explícitamente el enriquecimiento.
 - Sin métricas horarias suficientes, las recomendaciones de horario quedan limitadas.
+
+## Portales por usuario final
+
+La plataforma ahora se organiza por perfil de uso para reducir saturación visual y adaptar la experiencia al tipo de usuario:
+
+- **Portal Técnico / Operativo**: concentra carga e inspección, Mission Control, simulación, vista ejecutiva, agente operativo, cuadrillas, validación, auditoría y evidencia.
+- **Portal Ciudadano / Impacto Social**: concentra portal ciudadano, experiencia ciudadana, recomendador de zonas WiFi, buzón anónimo, equidad digital, retorno social de conectividad, agente ciudadano y vista pública de calidad.
+
+La selección se realiza desde la barra lateral con **Selecciona el tipo de usuario**.
+
+## Retorno Social de Conectividad
+
+Este módulo cruza desempeño de la red WiFi con indicadores socioeconómicos agregados para priorizar mejoras donde la conectividad puede generar mayor impacto público.
+
+### Datos socioeconómicos que acepta
+
+- CSV / XLSX cargado manualmente
+- archivo local dentro de `data/raw/`
+- URL pública si el usuario la provee
+- conector configurable a Socrata / [datos.gov.co](https://www.datos.gov.co)
+
+### Fuentes agregadas soportadas
+
+- **DANE**: IPM, NBI u otros indicadores oficiales agregados
+- **SISBÉN agregado o anonimización territorial**: porcentajes por grupo o muestras anonimizadas, nunca fichas individuales
+- otros datos abiertos oficiales siempre que estén agregados por zona, comuna, barrio, corregimiento, manzana o municipio
+
+### Social ROI Connectivity Score
+
+Se calcula con una fórmula transparente:
+
+`social_roi_score = 0.30 * socioeconomic_vulnerability_score + 0.25 * digital_need_score + 0.20 * network_risk_score + 0.15 * citizen_potential_score + 0.10 * data_confidence_score`
+
+Donde:
+
+- `socioeconomic_vulnerability_score`: señal agregada construida desde IPM, NBI, desempleo, grupos SISBÉN u otros indicadores disponibles
+- `digital_need_score`: combina experiencia ciudadana, proxy de equidad digital y disponibilidad
+- `network_risk_score`: resume riesgo operativo observado
+- `citizen_potential_score`: combina uso, actividad y criticidad territorial cuando exista
+- `data_confidence_score`: mide qué tan completa y consistente es la evidencia
+
+### Privacidad y uso responsable
+
+- No se usan datos personales.
+- No se procesan identificadores individuales de SISBÉN.
+- No se infiere pobreza de personas.
+- No se estigmatizan barrios o corregimientos.
+- El resultado se presenta como **retorno social estimado** y no como verdad causal o diagnóstico definitivo.
+
+### Limitaciones
+
+- Si faltan indicadores socioeconómicos agregados, el score se degrada y la app lo declara explícitamente.
+- Si no hay match territorial suficiente entre red y dataset socioeconómico, se marca como limitación.
+- Sin Gemini, la explicación de retorno social usa fallback determinístico.

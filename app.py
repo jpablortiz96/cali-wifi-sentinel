@@ -121,6 +121,28 @@ from src.schema_mapper import (
     get_module_readiness,
     suggest_schema_mapping,
 )
+from src.social_roi import (
+    calculate_social_roi_score,
+    generate_social_infrastructure_recommendations,
+    prepare_social_roi_inputs,
+)
+from src.social_roi_agent import (
+    build_social_roi_context,
+    fallback_social_roi_explanation,
+    generate_social_roi_explanation_with_gemini,
+)
+from src.socioeconomic_connectors import (
+    fetch_socrata_dataset,
+    get_dane_ipm_metadata,
+    get_dane_nbi_metadata,
+    get_sisben_open_data_metadata,
+)
+from src.socioeconomic_sources import (
+    detect_socioeconomic_geo_level,
+    load_socioeconomic_file,
+    normalize_socioeconomic_columns,
+    validate_socioeconomic_dataset,
+)
 from src.strategic_recommendation_agent import get_or_generate_strategic_recommendations
 from src.strategic_recommendations import generate_strategic_recommendations
 from src.technical_chat import answer_technical_question, build_orchestrated_context
@@ -151,6 +173,14 @@ from src.wifi_package_loader import (
     load_wifi_package_from_github,
 )
 from src.work_orders import generate_work_orders
+from src.user_portals import (
+    CITIZEN_PROFILE,
+    TECHNICAL_PROFILE,
+    get_citizen_sections,
+    get_default_section_for_profile,
+    get_technical_sections,
+    render_profile_selector,
+)
 
 
 st.set_page_config(page_title="Cali WiFi Sentinel 360", layout="wide")
@@ -198,6 +228,26 @@ def show_initial_instructions() -> None:
         6. Revisa órdenes, impacto, cuadrillas, validación humana y auditoría.
         """
     )
+
+
+def build_tab_visibility_css(all_sections: list[str], visible_sections: list[str]) -> str:
+    """Oculta pestañas no relevantes según el perfil activo sin romper la lógica existente."""
+    hidden_indexes = [
+        index + 1
+        for index, section_name in enumerate(all_sections)
+        if section_name not in visible_sections
+    ]
+    if not hidden_indexes:
+        return ""
+
+    rules = []
+    for index in hidden_indexes:
+        rules.append(
+            f".stTabs [data-baseweb=\"tab-list\"] button:nth-child({index})"
+            "{display:none !important;}"
+        )
+
+    return "<style>" + "".join(rules) + "</style>"
 
 
 def is_synthetic_dataset(dataframe: pd.DataFrame | None) -> bool:
@@ -630,6 +680,40 @@ def build_citizen_bundle(
     }
 
 
+def build_social_roi_bundle(
+    active_results: dict[str, object],
+    citizen_bundle: dict[str, object],
+    socioeconomic_df: pd.DataFrame | None = None,
+    socioeconomic_validation: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Construye artefactos de retorno social a partir de red + experiencia + datos socioeconómicos agregados."""
+    validation = socioeconomic_validation if isinstance(socioeconomic_validation, dict) else {}
+    socio_df = socioeconomic_df if isinstance(socioeconomic_df, pd.DataFrame) else pd.DataFrame()
+    merged_inputs = prepare_social_roi_inputs(
+        operational_mart=active_results.get("operational_mart", pd.DataFrame()) if isinstance(active_results, dict) else pd.DataFrame(),
+        citizen_scores=citizen_bundle.get("citizen_scores", pd.DataFrame()) if isinstance(citizen_bundle, dict) else pd.DataFrame(),
+        digital_equity_df=citizen_bundle.get("digital_equity", pd.DataFrame()) if isinstance(citizen_bundle, dict) else pd.DataFrame(),
+        socioeconomic_df=socio_df,
+        osm_context=active_results.get("osm_context", pd.DataFrame()) if isinstance(active_results, dict) else pd.DataFrame(),
+    )
+    social_roi_scores = calculate_social_roi_score(merged_inputs)
+    recommendations_df = generate_social_infrastructure_recommendations(social_roi_scores)
+
+    limitations = list(validation.get("warnings", [])) if isinstance(validation.get("warnings"), list) else []
+    if isinstance(validation.get("privacy_warnings"), list):
+        limitations.extend(validation.get("privacy_warnings", []))
+    if socio_df.empty:
+        limitations.append("No hay dataset socioeconómico cargado; el score de retorno social no puede priorizar vulnerabilidad agregada.")
+
+    return {
+        "merged_inputs": merged_inputs,
+        "social_roi_scores": social_roi_scores,
+        "recommendations": recommendations_df,
+        "validation": validation,
+        "limitations": limitations,
+    }
+
+
 def flatten_passports(passports: list[dict[str, object]]) -> pd.DataFrame:
     """Convierte pasaportes a tabla para revisión y descarga."""
     if not passports:
@@ -822,6 +906,8 @@ def build_export_payload(
     synthetic_flag: bool,
     citizen_bundle: dict[str, object] | None = None,
     citizen_insights_markdown: str | None = None,
+    social_roi_bundle: dict[str, object] | None = None,
+    social_roi_explanation_markdown: str | None = None,
 ) -> dict[str, object]:
     """Enriquece resultados para paquete de evidencia."""
     payload = dict(active_results)
@@ -843,6 +929,12 @@ def build_export_payload(
         payload["calendar_public_summary"] = citizen_bundle.get("calendar_summary", {})
     if citizen_insights_markdown:
         payload["citizen_insights_markdown"] = citizen_insights_markdown
+    if isinstance(social_roi_bundle, dict):
+        payload["socioeconomic_validation"] = social_roi_bundle.get("validation", {})
+        payload["social_roi_scores"] = social_roi_bundle.get("social_roi_scores", pd.DataFrame())
+        payload["social_roi_recommendations"] = social_roi_bundle.get("recommendations", pd.DataFrame())
+    if social_roi_explanation_markdown:
+        payload["social_roi_explanation_markdown"] = social_roi_explanation_markdown
     return payload
 
 
@@ -954,6 +1046,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(f"<div class='cw-flow-banner'>{RECOMMENDED_FLOW_TEXT}</div>", unsafe_allow_html=True)
+selected_profile = render_profile_selector()
+visible_sections = get_citizen_sections() if selected_profile == CITIZEN_PROFILE else get_technical_sections()
 
 with st.sidebar:
     st.markdown("### Navegación rápida")
@@ -970,6 +1064,13 @@ with st.sidebar:
             ]
         )
     )
+    st.caption(f"Portal activo: {selected_profile}")
+    if selected_profile == TECHNICAL_PROFILE:
+        st.info("Perfil técnico: se priorizan módulos de operación, auditoría y evidencia.")
+    else:
+        st.info("Perfil ciudadano: se priorizan módulos de experiencia, equidad y retorno social.")
+    st.markdown("Secciones visibles:")
+    st.markdown("\n".join([f"- {section}" for section in visible_sections]))
 
 st.markdown("### Cargar paquete oficial Zonas WiFi Inteligentes")
 package_control_col1, package_control_col2, package_control_col3 = st.columns([1.2, 1.2, 1.6])
@@ -1122,30 +1223,35 @@ if dataframe is not None and not dataframe.empty:
     suggested_mapping = suggest_schema_mapping(dataframe)
     initialize_mapping_state(file_signature, suggested_mapping)
 
-tabs = st.tabs(
-    [
-        "Carga e Inspeccion",
-        "Mapeo de Columnas",
-        "Mission Control",
-        "Simulacion Operativa",
-        "Vista Ejecutiva 360",
-        "Portal Ciudadano",
-        "Experiencia Ciudadana",
-        "Buzon Ciudadano",
-        "Equidad Digital",
-        "Agente Operativo",
-        "Impacto Ciudadano",
-        "Cuadrillas",
-        "Pasaporte de Decision",
-        "Agente Estrategico",
-        "Agente Conversacional",
-        "Agente Ciudadano",
-        "Validacion Humana",
-        "Blindaje Tecnico",
-        "Auditoria Operativa",
-        "Paquete de Evidencia",
-    ]
-)
+all_sections = [
+    "Carga e Inspeccion",
+    "Mapeo de Columnas",
+    "Mission Control",
+    "Simulacion Operativa",
+    "Vista Ejecutiva 360",
+    "Portal Ciudadano",
+    "Experiencia Ciudadana",
+    "Recomendador de Zonas WiFi",
+    "Buzon Ciudadano",
+    "Equidad Digital",
+    "Retorno Social de Conectividad",
+    "Agente Operativo",
+    "Impacto Ciudadano",
+    "Cuadrillas",
+    "Pasaporte de Decision",
+    "Agente Estrategico",
+    "Agente Conversacional",
+    "Agente Ciudadano",
+    "Vista Publica de Calidad",
+    "Validacion Humana",
+    "Blindaje Tecnico",
+    "Auditoria Operativa",
+    "Paquete de Evidencia",
+]
+tabs = st.tabs(all_sections)
+tab_visibility_css = build_tab_visibility_css(all_sections, visible_sections)
+if tab_visibility_css:
+    st.markdown(tab_visibility_css, unsafe_allow_html=True)
 
 schema_mapping: dict[str, str | None] = {field_key: None for field_key in MAPPING_FIELD_CONFIG}
 mapping_signature = build_mapping_signature(schema_mapping)
@@ -1395,6 +1501,14 @@ if dataframe is not None and not dataframe.empty:
         if isinstance(recommendations_payload, dict) and recommendations_payload.get("dataset_signature") == file_signature:
             snapshot["recommendations"] = recommendations_payload.get("data", pd.DataFrame())
 
+        socioeconomic_payload = st.session_state.get("socioeconomic_dataset_payload", {})
+        if isinstance(socioeconomic_payload, dict) and socioeconomic_payload.get("dataset_signature") == file_signature:
+            snapshot["socioeconomic_validation"] = socioeconomic_payload.get("validation", {})
+
+        social_roi_payload = st.session_state.get("social_roi_explanation_payload", {})
+        if isinstance(social_roi_payload, dict) and social_roi_payload.get("dataset_signature") == file_signature:
+            snapshot["social_roi_explanation_markdown"] = social_roi_payload.get("markdown", "")
+
         resolved_source = source_hint
         if not resolved_source:
             if replay_state and replay_state.get("current_results"):
@@ -1411,6 +1525,10 @@ else:
 citizen_bundle: dict[str, object] = {}
 citizen_calendar_context_df = pd.DataFrame()
 citizen_insights_markdown = ""
+social_roi_bundle: dict[str, object] = {}
+socioeconomic_df = pd.DataFrame()
+socioeconomic_validation: dict[str, object] = {}
+social_roi_explanation_markdown = ""
 if dataframe is not None and not dataframe.empty and isinstance(active_results, dict):
     public_calendar_payload = st.session_state.get("latest_public_calendar_context", {})
     if isinstance(public_calendar_payload, dict) and public_calendar_payload.get("dataset_signature") == file_signature:
@@ -1432,6 +1550,25 @@ if dataframe is not None and not dataframe.empty and isinstance(active_results, 
     if isinstance(citizen_payload, dict) and citizen_payload.get("dataset_signature") == file_signature:
         citizen_insights_markdown = str(citizen_payload.get("markdown", ""))
         active_results["citizen_insights_markdown"] = citizen_insights_markdown
+
+    socioeconomic_payload = st.session_state.get("socioeconomic_dataset_payload", {})
+    if isinstance(socioeconomic_payload, dict) and socioeconomic_payload.get("dataset_signature") == file_signature:
+        socioeconomic_df = socioeconomic_payload.get("data", pd.DataFrame())
+        socioeconomic_validation = socioeconomic_payload.get("validation", {})
+
+    social_roi_bundle = build_social_roi_bundle(
+        active_results,
+        citizen_bundle,
+        socioeconomic_df=socioeconomic_df,
+        socioeconomic_validation=socioeconomic_validation,
+    )
+    active_results["socioeconomic_validation"] = socioeconomic_validation
+    active_results["social_roi_scores"] = social_roi_bundle.get("social_roi_scores", pd.DataFrame())
+    active_results["social_roi_recommendations"] = social_roi_bundle.get("recommendations", pd.DataFrame())
+    social_roi_payload = st.session_state.get("social_roi_explanation_payload", {})
+    if isinstance(social_roi_payload, dict) and social_roi_payload.get("dataset_signature") == file_signature:
+        social_roi_explanation_markdown = str(social_roi_payload.get("markdown", ""))
+        active_results["social_roi_explanation_markdown"] = social_roi_explanation_markdown
 
 
 with tabs[4]:
@@ -1579,6 +1716,10 @@ with tabs[4]:
             citizen_feedback_summary = citizen_bundle.get("feedback_summary", {}) if isinstance(citizen_bundle, dict) else {}
             digital_equity_df = citizen_bundle.get("digital_equity", pd.DataFrame()) if isinstance(citizen_bundle, dict) else pd.DataFrame()
             digital_equity_df = digital_equity_df if isinstance(digital_equity_df, pd.DataFrame) else pd.DataFrame()
+            social_roi_scores_df = social_roi_bundle.get("social_roi_scores", pd.DataFrame()) if isinstance(social_roi_bundle, dict) else pd.DataFrame()
+            social_roi_scores_df = social_roi_scores_df if isinstance(social_roi_scores_df, pd.DataFrame) else pd.DataFrame()
+            social_roi_recommendations_df = social_roi_bundle.get("recommendations", pd.DataFrame()) if isinstance(social_roi_bundle, dict) else pd.DataFrame()
+            social_roi_recommendations_df = social_roi_recommendations_df if isinstance(social_roi_recommendations_df, pd.DataFrame) else pd.DataFrame()
 
             render_section_header(
                 "Bloque ciudadano",
@@ -1636,6 +1777,53 @@ with tabs[4]:
                     "Ve a Portal Ciudadano para consultar recomendaciones por zona y horario, revisar alertas y enviar feedback anónimo.",
                     "media",
                 )
+
+            render_section_header(
+                "Retorno Social de Conectividad",
+                "Cruce entre desempeño WiFi, experiencia ciudadana y datos socioeconómicos agregados para priorizar mejoras con mayor impacto público esperado.",
+            )
+            if social_roi_scores_df.empty:
+                render_empty_state(
+                    "Sin retorno social calculado",
+                    "Carga y valida un dataset socioeconómico agregado para activar esta vista.",
+                )
+            else:
+                top_social_roi_row = social_roi_scores_df.sort_values("social_roi_score", ascending=False).iloc[0]
+                social_roi_avg = round(
+                    float(pd.to_numeric(social_roi_scores_df.get("social_roi_score"), errors="coerce").dropna().mean()),
+                    2,
+                )
+                high_social_roi = int(
+                    social_roi_scores_df["social_roi_label"].astype(str).isin(["Muy alto retorno social", "Alto retorno social"]).sum()
+                ) if "social_roi_label" in social_roi_scores_df.columns else 0
+                social_roi_cols = st.columns(4)
+                with social_roi_cols[0]:
+                    render_premium_kpi_card("Social ROI promedio", social_roi_avg, "Retorno social estimado", "info", "🌍")
+                with social_roi_cols[1]:
+                    render_premium_kpi_card("Zona top ROI", str(top_social_roi_row.get("zone_name", "N/A")), "Mayor prioridad social", "warning", "🎯")
+                with social_roi_cols[2]:
+                    render_premium_kpi_card("Zonas alto ROI", high_social_roi, "Alto o muy alto retorno", "ok", "✅")
+                with social_roi_cols[3]:
+                    render_premium_kpi_card(
+                        "Nivel socioeconómico",
+                        socioeconomic_validation.get("level", "Sin validar"),
+                        "Nivel geográfico cargado",
+                        "neutral",
+                        "📊",
+                    )
+                social_roi_preview_cols = st.columns(2)
+                with social_roi_preview_cols[0]:
+                    render_dataframe_clean(
+                        social_roi_scores_df.sort_values("social_roi_score", ascending=False).head(5),
+                        title="Zonas con mayor retorno social esperado",
+                        height=220,
+                    )
+                with social_roi_preview_cols[1]:
+                    render_dataframe_clean(
+                        social_roi_recommendations_df.head(5),
+                        title="Recomendaciones de infraestructura y acompañamiento",
+                        height=220,
+                    )
 
             selected_zone = None
             if not impact_scores_df.empty and "zona" in impact_scores_df.columns:
@@ -2334,6 +2522,67 @@ with tabs[6]:
 
 
 with tabs[7]:
+    render_section_header(
+        "Recomendador de Zonas WiFi",
+        "Sugiere dónde y cuándo conectarse usando experiencia agregada, estabilidad y patrones horarios.",
+    )
+    if dataframe is None or dataframe.empty or not isinstance(citizen_bundle, dict):
+        render_empty_state("Sin recomendador disponible", "Carga un dataset y genera resultados operativos primero.")
+    else:
+        citizen_scores_df = citizen_bundle.get("citizen_scores", pd.DataFrame())
+        citizen_scores_df = citizen_scores_df if isinstance(citizen_scores_df, pd.DataFrame) else pd.DataFrame()
+        citizen_zone_summary_df = citizen_bundle.get("zone_summary", pd.DataFrame())
+        citizen_zone_summary_df = citizen_zone_summary_df if isinstance(citizen_zone_summary_df, pd.DataFrame) else pd.DataFrame()
+        hourly_patterns_df = citizen_bundle.get("hourly_patterns", pd.DataFrame())
+        hourly_patterns_df = hourly_patterns_df if isinstance(hourly_patterns_df, pd.DataFrame) else pd.DataFrame()
+
+        if citizen_scores_df.empty:
+            render_empty_state("Sin evidencia suficiente", "No hay Citizen Experience Score disponible para recomendar zonas.")
+        else:
+            zone_options = ["Top general"]
+            if not citizen_zone_summary_df.empty and "zona" in citizen_zone_summary_df.columns:
+                zone_options += sorted(citizen_zone_summary_df["zona"].astype(str).dropna().unique().tolist())
+            time_options = ["Sin preferencia"]
+            if not hourly_patterns_df.empty and "hour" in hourly_patterns_df.columns:
+                time_options += [f"{int(hour):02d}:00" for hour in sorted(hourly_patterns_df["hour"].dropna().unique().tolist())]
+
+            recommender_col1, recommender_col2 = st.columns(2)
+            with recommender_col1:
+                user_zone_preference = st.selectbox("Zona de referencia", zone_options, key="citizen_recommender_zone")
+            with recommender_col2:
+                user_time_preference = st.selectbox("Preferencia horaria", time_options, key="citizen_recommender_time")
+
+            recommender_state_key = build_state_key("citizen_wifi_recommender", file_signature, mapping_signature)
+            if st.button("Calcular ranking ciudadano", use_container_width=True, key="citizen_recommender_button"):
+                st.session_state[recommender_state_key] = recommend_best_wifi_zones(
+                    citizen_scores_df,
+                    user_zone=None if user_zone_preference == "Top general" else user_zone_preference,
+                    time_preference=None if user_time_preference == "Sin preferencia" else user_time_preference,
+                    top_n=8,
+                )
+
+            recommender_df = st.session_state.get(recommender_state_key)
+            if not isinstance(recommender_df, pd.DataFrame) or recommender_df.empty:
+                recommender_df = recommend_best_wifi_zones(citizen_scores_df, top_n=8)
+
+            render_dataframe_clean(recommender_df, title="Ranking recomendado para conectarse", height=320)
+            if not recommender_df.empty and {"ap_name", "score"}.issubset(recommender_df.columns):
+                st.plotly_chart(
+                    px.bar(
+                        recommender_df.head(8),
+                        x="score",
+                        y="ap_name",
+                        color="estado" if "estado" in recommender_df.columns else None,
+                        orientation="h",
+                        title="Top zonas/AP recomendados",
+                    ),
+                    use_container_width=True,
+                    key="citizen_recommender_bar",
+                )
+            st.caption("La recomendación usa datos agregados. No estima experiencia individual ni rastrea personas.")
+
+
+with tabs[8]:
     render_section_header("Buzon Ciudadano", "Recibe reportes anonimos para mejorar el servicio sin recolectar datos personales.")
     st.warning("No ingreses datos personales. Este reporte es anonimo y se usa solo para mejorar el servicio.")
 
@@ -2405,7 +2654,7 @@ with tabs[7]:
         render_dataframe_clean(feedback_df.tail(20), title="Historial reciente del buzon", height=260)
 
 
-with tabs[8]:
+with tabs[9]:
     render_section_header("Equidad Digital", "Proxy responsable para señalar donde podria existir necesidad de mejora en acceso, calidad o evidencia.")
     if dataframe is None or dataframe.empty or not isinstance(citizen_bundle, dict):
         render_empty_state("Sin proxy de equidad", "Carga un dataset y genera resultados operativos primero.")
@@ -2435,7 +2684,223 @@ with tabs[8]:
             st.info("Este indicador es un proxy de equidad digital. No usa poblacion real ni confirma brechas estructurales por si solo.")
 
 
-with tabs[15]:
+with tabs[10]:
+    render_section_header(
+        "Retorno Social de Conectividad",
+        "Cruza desempeño de la red WiFi con indicadores socioeconómicos agregados para priorizar mejoras donde la conectividad puede generar mayor impacto público.",
+    )
+    if dataframe is None or dataframe.empty or not isinstance(citizen_bundle, dict):
+        render_empty_state("Sin módulo social disponible", "Carga un dataset y genera resultados operativos primero.")
+    else:
+        st.caption(
+            "Este módulo acepta datos socioeconómicos agregados por zona, comuna, barrio, corregimiento, manzana o municipio. "
+            "No procesa datos personales ni fichas individuales de SISBÉN."
+        )
+
+        socio_local_candidates = [
+            path for path in list_local_datasets()
+            if Path(path).suffix.lower() in {".csv", ".xlsx", ".xls", ".txt"}
+        ]
+        socio_upload = st.file_uploader(
+            "Cargar archivo socioeconómico (CSV/XLSX)",
+            type=["csv", "xlsx", "xls", "txt"],
+            key="socioeconomic_file_uploader",
+        )
+        socio_source_mode = st.radio(
+            "Origen del dataset socioeconómico",
+            ["Archivo cargado", "Archivo local", "URL pública", "Socrata / datos.gov.co"],
+            horizontal=True,
+            key="socioeconomic_source_mode",
+        )
+
+        socio_input_value: object = socio_upload
+        if socio_source_mode == "Archivo local":
+            socio_selected_path = st.selectbox(
+                "Archivo local disponible",
+                options=socio_local_candidates or ["Sin archivos disponibles"],
+                key="socioeconomic_local_selector",
+            )
+            socio_input_value = None if socio_selected_path == "Sin archivos disponibles" else socio_selected_path
+        elif socio_source_mode == "URL pública":
+            socio_input_value = st.text_input(
+                "URL pública del archivo socioeconómico",
+                key="socioeconomic_public_url",
+                placeholder="https://...",
+            ).strip()
+        elif socio_source_mode == "Socrata / datos.gov.co":
+            socrata_col1, socrata_col2 = st.columns(2)
+            with socrata_col1:
+                socrata_domain = st.text_input(
+                    "Dominio Socrata",
+                    value="www.datos.gov.co",
+                    key="socioeconomic_socrata_domain",
+                ).strip()
+            with socrata_col2:
+                socrata_dataset_id = st.text_input(
+                    "Dataset ID",
+                    key="socioeconomic_socrata_id",
+                    placeholder="abcd-1234",
+                ).strip()
+            socio_input_value = {"domain": socrata_domain, "dataset_id": socrata_dataset_id}
+
+        metadata_col1, metadata_col2, metadata_col3 = st.columns(3)
+        with metadata_col1:
+            st.caption("Fuentes sugeridas")
+            st.markdown(f"- [DANE IPM]({get_dane_ipm_metadata().get('url')})")
+        with metadata_col2:
+            st.markdown(f"- [DANE NBI]({get_dane_nbi_metadata().get('url')})")
+        with metadata_col3:
+            st.markdown(f"- [SISBÉN abierto]({get_sisben_open_data_metadata().get('url')})")
+
+        if st.button("Cargar y validar dataset socioeconómico", use_container_width=True, key="socioeconomic_validate_button"):
+            try:
+                if socio_source_mode == "Socrata / datos.gov.co":
+                    if not isinstance(socio_input_value, dict) or not socio_input_value.get("dataset_id"):
+                        st.warning("Ingresa un dataset_id de Socrata para continuar.")
+                    else:
+                        socio_raw_df = fetch_socrata_dataset(
+                            socio_input_value.get("domain", "www.datos.gov.co"),
+                            socio_input_value.get("dataset_id", ""),
+                            limit=5000,
+                        )
+                        socioeconomic_df = normalize_socioeconomic_columns(socio_raw_df)
+                        socioeconomic_validation = validate_socioeconomic_dataset(socioeconomic_df)
+                else:
+                    socioeconomic_df = normalize_socioeconomic_columns(load_socioeconomic_file(socio_input_value))
+                    socioeconomic_validation = validate_socioeconomic_dataset(socioeconomic_df)
+
+                if not socioeconomic_df.empty:
+                    st.session_state["socioeconomic_dataset_payload"] = {
+                        "dataset_signature": file_signature,
+                        "data": socioeconomic_df,
+                        "validation": socioeconomic_validation,
+                    }
+                    st.success("Dataset socioeconómico cargado y validado.")
+                    st.rerun()
+            except Exception as exc:
+                st.warning(f"No fue posible cargar el dataset socioeconómico: {exc}")
+
+        validation_cols = st.columns(4)
+        validation_cols[0].metric("Nivel geográfico", socioeconomic_validation.get("level", "Sin validar"))
+        validation_cols[1].metric("Indicadores", len(socioeconomic_validation.get("available_indicators", [])))
+        validation_cols[2].metric("Advertencias", len(socioeconomic_validation.get("warnings", [])))
+        validation_cols[3].metric("Privacidad", len(socioeconomic_validation.get("privacy_warnings", [])))
+        render_dataframe_clean(socioeconomic_df.head(15), title="Muestra socioeconómica cargada", height=240)
+        render_dataframe_clean(
+            pd.DataFrame({"indicador": socioeconomic_validation.get("available_indicators", [])}),
+            title="Indicadores disponibles",
+            height=160,
+        )
+        render_dataframe_clean(
+            pd.DataFrame({"advertencia": socioeconomic_validation.get("warnings", [])}),
+            title="Advertencias de calidad",
+            height=160,
+        )
+        render_dataframe_clean(
+            pd.DataFrame({"privacidad": socioeconomic_validation.get("privacy_warnings", [])}),
+            title="Advertencias de privacidad",
+            height=160,
+        )
+
+        if st.button("Calcular Retorno Social de Conectividad", use_container_width=True, key="social_roi_calculate_button"):
+            social_roi_bundle = build_social_roi_bundle(
+                active_results,
+                citizen_bundle,
+                socioeconomic_df=socioeconomic_df,
+                socioeconomic_validation=socioeconomic_validation,
+            )
+            active_results["socioeconomic_validation"] = socioeconomic_validation
+            active_results["social_roi_scores"] = social_roi_bundle.get("social_roi_scores", pd.DataFrame())
+            active_results["social_roi_recommendations"] = social_roi_bundle.get("recommendations", pd.DataFrame())
+            sync_latest_operational_snapshot(source_hint="mixed")
+            st.success("Retorno Social de Conectividad actualizado.")
+
+        social_roi_scores_df = social_roi_bundle.get("social_roi_scores", pd.DataFrame()) if isinstance(social_roi_bundle, dict) else pd.DataFrame()
+        social_roi_scores_df = social_roi_scores_df if isinstance(social_roi_scores_df, pd.DataFrame) else pd.DataFrame()
+        social_roi_recommendations_df = social_roi_bundle.get("recommendations", pd.DataFrame()) if isinstance(social_roi_bundle, dict) else pd.DataFrame()
+        social_roi_recommendations_df = social_roi_recommendations_df if isinstance(social_roi_recommendations_df, pd.DataFrame) else pd.DataFrame()
+
+        if social_roi_scores_df.empty:
+            render_empty_state(
+                "Sin Social ROI calculado",
+                "Carga un dataset socioeconómico agregado y pulsa el botón de cálculo para activar esta vista.",
+            )
+        else:
+            top_three = social_roi_scores_df.sort_values("social_roi_score", ascending=False).head(3)
+            top_cards = st.columns(min(3, len(top_three)))
+            for card_index, (_, card_row) in enumerate(top_three.iterrows()):
+                with top_cards[card_index]:
+                    render_action_card(
+                        str(card_row.get("zone_name", "Zona")),
+                        f"{card_row.get('social_roi_label', 'Sin clasificar')} | Score {float(card_row.get('social_roi_score', 0)):.2f}",
+                        "media",
+                    )
+
+            render_dataframe_clean(
+                social_roi_scores_df.sort_values("social_roi_score", ascending=False),
+                title="Ranking de retorno social de conectividad",
+                height=320,
+            )
+            st.plotly_chart(
+                px.bar(
+                    social_roi_scores_df.sort_values("social_roi_score", ascending=False).head(15),
+                    x="zone_name",
+                    y="social_roi_score",
+                    color="social_roi_label",
+                    title="Top zonas por retorno social esperado",
+                ),
+                use_container_width=True,
+                key="social_roi_bar_chart",
+            )
+            st.plotly_chart(
+                px.scatter(
+                    social_roi_scores_df,
+                    x="socioeconomic_vulnerability_score",
+                    y="network_risk_score",
+                    size="citizen_potential_score",
+                    color="social_roi_label",
+                    hover_name="zone_name",
+                    title="Vulnerabilidad agregada vs riesgo de red",
+                ),
+                use_container_width=True,
+                key="social_roi_scatter",
+            )
+            render_dataframe_clean(
+                social_roi_recommendations_df,
+                title="Recomendaciones de infraestructura y acompañamiento social",
+                height=240,
+            )
+            if social_roi_bundle.get("limitations"):
+                st.warning(" | ".join(str(item) for item in social_roi_bundle.get("limitations", [])[:4]))
+
+            if st.button("Explicar con Gemini", use_container_width=True, key="social_roi_explain_button"):
+                social_roi_context = build_social_roi_context(
+                    social_roi_scores_df,
+                    socioeconomic_validation,
+                    social_roi_bundle.get("limitations", []),
+                )
+                social_roi_explanation_markdown = (
+                    generate_social_roi_explanation_with_gemini(social_roi_context)
+                    if is_gemini_configured()
+                    else fallback_social_roi_explanation(social_roi_context)
+                )
+                st.session_state["social_roi_explanation_payload"] = {
+                    "dataset_signature": file_signature,
+                    "markdown": social_roi_explanation_markdown,
+                }
+                active_results["social_roi_explanation_markdown"] = social_roi_explanation_markdown
+                sync_latest_operational_snapshot(source_hint="mixed")
+                st.success(
+                    "Explicación de retorno social generada con Gemini."
+                    if is_gemini_configured()
+                    else "Gemini no está configurado. Se generó fallback determinístico."
+                )
+
+            if social_roi_explanation_markdown:
+                st.markdown(social_roi_explanation_markdown)
+
+
+with tabs[17]:
     render_section_header(
         "Agente Ciudadano",
         "Explica en lenguaje claro que zonas lucen mas estables para conectarse y que deberia revisar la Alcaldia con base en datos agregados.",
@@ -2472,7 +2937,74 @@ with tabs[15]:
         st.markdown(citizen_insights_markdown)
 
 
-with tabs[16]:
+with tabs[18]:
+    render_section_header(
+        "Vista Publica de Calidad",
+        "Vista simplificada para ciudadanía y equipos de territorio con el estado agregado de calidad, alertas y recomendaciones de uso.",
+    )
+    if dataframe is None or dataframe.empty or not isinstance(citizen_bundle, dict):
+        render_empty_state("Sin vista pública disponible", "Carga un dataset y genera resultados operativos primero.")
+    else:
+        citizen_scores_df = citizen_bundle.get("citizen_scores", pd.DataFrame())
+        citizen_scores_df = citizen_scores_df if isinstance(citizen_scores_df, pd.DataFrame) else pd.DataFrame()
+        citizen_alerts_df = citizen_bundle.get("alerts", pd.DataFrame())
+        citizen_alerts_df = citizen_alerts_df if isinstance(citizen_alerts_df, pd.DataFrame) else pd.DataFrame()
+        digital_equity_df = citizen_bundle.get("digital_equity", pd.DataFrame())
+        digital_equity_df = digital_equity_df if isinstance(digital_equity_df, pd.DataFrame) else pd.DataFrame()
+        social_roi_scores_df = social_roi_bundle.get("social_roi_scores", pd.DataFrame()) if isinstance(social_roi_bundle, dict) else pd.DataFrame()
+        social_roi_scores_df = social_roi_scores_df if isinstance(social_roi_scores_df, pd.DataFrame) else pd.DataFrame()
+
+        if citizen_scores_df.empty:
+            render_empty_state("Sin calidad pública disponible", "No hay suficiente evidencia agregada para publicar un estado estimado.")
+        else:
+            public_cols = st.columns(4)
+            public_cols[0].metric(
+                "Experience promedio",
+                round(float(pd.to_numeric(citizen_scores_df.get("citizen_experience_score"), errors="coerce").mean()), 2),
+            )
+            public_cols[1].metric(
+                "Zonas con buena experiencia",
+                int(citizen_scores_df["citizen_status"].astype(str).isin(["Excelente", "Buena"]).sum())
+                if "citizen_status" in citizen_scores_df.columns
+                else 0,
+            )
+            public_cols[2].metric("Alertas activas", len(citizen_alerts_df))
+            public_cols[3].metric("Top Social ROI", int(len(social_roi_scores_df)))
+
+            public_view_cols = st.columns(2)
+            with public_view_cols[0]:
+                render_dataframe_clean(
+                    citizen_scores_df.sort_values("citizen_experience_score", ascending=False).head(10),
+                    title="Zonas con mejor experiencia estimada",
+                    height=260,
+                )
+            with public_view_cols[1]:
+                render_dataframe_clean(
+                    citizen_alerts_df.head(10),
+                    title="Alertas y precauciones para usuarios",
+                    height=260,
+                )
+
+            if not social_roi_scores_df.empty:
+                st.plotly_chart(
+                    px.bar(
+                        social_roi_scores_df.sort_values("social_roi_score", ascending=False).head(10),
+                        x="zone_name",
+                        y="social_roi_score",
+                        color="social_roi_label",
+                        title="Zonas con mayor retorno social de conectividad",
+                    ),
+                    use_container_width=True,
+                    key="public_social_roi_bar",
+                )
+            if not digital_equity_df.empty:
+                render_dataframe_clean(digital_equity_df.head(10), title="Señales de equidad digital", height=220)
+            st.info(
+                "Esta vista usa datos agregados por zona/AP/hora. No representa personas individuales ni sustituye verificación en campo."
+            )
+
+
+with tabs[19]:
     render_section_header(
         "Validación Humana",
         "El agente recomienda y prioriza, pero un operador responsable debe revisar, aprobar o escalar las órdenes antes de actuar en campo.",
@@ -2643,7 +3175,7 @@ with tabs[16]:
             )
 
 
-with tabs[17]:
+with tabs[20]:
     st.subheader("Blindaje Técnico")
     if dataframe is None or dataframe.empty:
         st.info("Carga un dataset primero.")
@@ -2696,7 +3228,7 @@ with tabs[17]:
             st.info("Ejecuta la validación técnica para construir el quality gate report.")
 
 
-with tabs[18]:
+with tabs[21]:
     render_section_header(
         "Auditoría Operativa",
         "Cada decisión relevante queda registrada para trazabilidad, revisión y mejora continua.",
@@ -2753,7 +3285,7 @@ with tabs[18]:
             )
 
 
-with tabs[9]:
+with tabs[11]:
     st.subheader("Agente Operativo")
     if dataframe is None or dataframe.empty or active_results is None:
         st.info("Carga un dataset y genera resultados operativos primero.")
@@ -2785,7 +3317,7 @@ with tabs[9]:
             )
 
 
-with tabs[10]:
+with tabs[12]:
     render_section_header(
         "Impacto Ciudadano",
         "Los pesos son transparentes y se calculan por reglas auditable, no con Gemini.",
@@ -2859,7 +3391,7 @@ with tabs[10]:
             )
 
 
-with tabs[11]:
+with tabs[13]:
     st.subheader("Simulador de Cuadrillas")
     if dataframe is None or dataframe.empty or active_results is None:
         st.info("Carga un dataset y genera impact scores primero.")
@@ -2901,7 +3433,7 @@ with tabs[11]:
             st.dataframe(waiting_df, use_container_width=True)
 
 
-with tabs[12]:
+with tabs[14]:
     render_section_header(
         "Pasaporte de Decisión",
         "Ficha operativa auditable para entender por qué una zona fue priorizada y qué decisión se recomienda tomar.",
@@ -3005,7 +3537,7 @@ with tabs[12]:
             )
 
 
-with tabs[13]:
+with tabs[15]:
     render_section_header(
         "Agente Estratégico",
         "Recomendaciones de mantenimiento e inversión con apoyo territorial y visualizaciones ejecutivas.",
@@ -3023,6 +3555,7 @@ with tabs[13]:
         osm_context_df = active_results.get("osm_context", pd.DataFrame())
         operational_mart_df = active_results.get("operational_mart", pd.DataFrame())
         meraki_anomalies_df = active_results.get("meraki_anomalies", pd.DataFrame())
+        social_roi_scores_df = active_results.get("social_roi_scores", pd.DataFrame())
         recommendations_df = recommendations_df if isinstance(recommendations_df, pd.DataFrame) else pd.DataFrame()
         work_orders_df = work_orders_df if isinstance(work_orders_df, pd.DataFrame) else pd.DataFrame()
         impact_scores_df = impact_scores_df if isinstance(impact_scores_df, pd.DataFrame) else pd.DataFrame()
@@ -3030,6 +3563,7 @@ with tabs[13]:
         osm_context_df = osm_context_df if isinstance(osm_context_df, pd.DataFrame) else pd.DataFrame()
         operational_mart_df = operational_mart_df if isinstance(operational_mart_df, pd.DataFrame) else pd.DataFrame()
         meraki_anomalies_df = meraki_anomalies_df if isinstance(meraki_anomalies_df, pd.DataFrame) else pd.DataFrame()
+        social_roi_scores_df = social_roi_scores_df if isinstance(social_roi_scores_df, pd.DataFrame) else pd.DataFrame()
 
         if active_results.get("is_meraki_mode"):
             st.info(
@@ -3142,6 +3676,26 @@ with tabs[13]:
                 "Mapea latitud y longitud reales para activar Open-Meteo y OpenStreetMap/Overpass.",
             )
 
+        if not social_roi_scores_df.empty:
+            render_section_header(
+                "Retorno social incorporado",
+                "Esta vista puede priorizar no solo por falla técnica sino también por retorno social esperado.",
+            )
+            roi_strategy_cols = st.columns(2)
+            with roi_strategy_cols[0]:
+                render_dataframe_clean(
+                    social_roi_scores_df.sort_values("social_roi_score", ascending=False).head(10),
+                    title="Top zonas por Social ROI",
+                    height=260,
+                )
+            with roi_strategy_cols[1]:
+                top_roi_row = social_roi_scores_df.sort_values("social_roi_score", ascending=False).iloc[0]
+                render_action_card(
+                    "Prioridad social sugerida",
+                    f"{top_roi_row.get('zone_name', 'Zona')} con Social ROI {float(top_roi_row.get('social_roi_score', 0)):.2f}. Conviene combinar la prioridad técnica con retorno social esperado.",
+                    "alta",
+                )
+
         recommendation_button_label = "Generar recomendaciones estratégicas con Gemini"
         if st.button(
             recommendation_button_label,
@@ -3250,7 +3804,7 @@ with tabs[13]:
             )
 
 
-with tabs[14]:
+with tabs[16]:
     st.subheader("Agente Conversacional Técnico")
     st.caption("El chat usa contexto resumido. No envía toda la base a Gemini.")
     if dataframe is None or dataframe.empty:
@@ -3274,7 +3828,7 @@ with tabs[14]:
             st.markdown(st.session_state["technical_chat_answer"])
 
 
-with tabs[19]:
+with tabs[22]:
     render_section_header(
         "Paquete de Evidencia Operativa",
         "Resumen legible de los resultados generados por el sistema para operación, validación y toma de decisiones.",
@@ -3299,6 +3853,8 @@ with tabs[19]:
             synthetic_flag=synthetic_flag,
             citizen_bundle=citizen_bundle,
             citizen_insights_markdown=citizen_insights_markdown,
+            social_roi_bundle=social_roi_bundle,
+            social_roi_explanation_markdown=social_roi_explanation_markdown,
         )
 
         readable_report = build_readable_evidence_report(export_payload)
@@ -3314,6 +3870,9 @@ with tabs[19]:
         citizen_recommendations_display_df = safe_to_dataframe(export_payload.get("citizen_recommendations"))
         citizen_feedback_display_df = safe_to_dataframe(export_payload.get("citizen_feedback"))
         digital_equity_display_df = safe_to_dataframe(export_payload.get("digital_equity_proxy"))
+        social_roi_display_df = safe_to_dataframe(export_payload.get("social_roi_scores"))
+        social_roi_recommendations_display_df = safe_to_dataframe(export_payload.get("social_roi_recommendations"))
+        socioeconomic_validation_payload = export_payload.get("socioeconomic_validation", {})
         citizen_feedback_summary_payload = export_payload.get("citizen_feedback_summary", {})
         recommended_df, waiting_df, crew_summary_text = format_crew_plan_for_display(export_payload.get("crew_plan", {}))
         quality_summary, critical_issues_df, warnings_df, quality_recommendations_df = format_quality_gate_for_display(
@@ -3474,6 +4033,27 @@ with tabs[19]:
             render_section_header("Equidad Digital Proxy")
             render_dataframe_clean(digital_equity_display_df.head(15), height=280)
             render_json_advanced("Equidad digital proxy", digital_equity_display_df.head(20).to_dict("records"))
+
+            if not social_roi_display_df.empty or not social_roi_recommendations_display_df.empty:
+                render_section_header("Retorno Social de Conectividad")
+                render_metric_row(
+                    {
+                        "Nivel geográfico": socioeconomic_validation_payload.get("level", "Sin validar"),
+                        "Indicadores": len(socioeconomic_validation_payload.get("available_indicators", [])),
+                        "Zonas priorizadas": len(social_roi_display_df),
+                        "Recomendaciones": len(social_roi_recommendations_display_df),
+                    }
+                )
+                render_dataframe_clean(social_roi_display_df.head(15), title="Social ROI Connectivity Score", height=280)
+                render_dataframe_clean(
+                    social_roi_recommendations_display_df.head(15),
+                    title="Recomendaciones de retorno social",
+                    height=220,
+                )
+                render_json_advanced("Validación socioeconómica", socioeconomic_validation_payload)
+                if export_payload.get("social_roi_explanation_markdown"):
+                    render_section_header("Explicación de retorno social")
+                    st.markdown(str(export_payload.get("social_roi_explanation_markdown")))
 
             if export_payload.get("citizen_insights_markdown"):
                 render_section_header("Agente Ciudadano")

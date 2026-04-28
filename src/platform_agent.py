@@ -68,8 +68,10 @@ def build_platform_agent_context(
             "Vista Ejecutiva 360",
             "Portal Ciudadano",
             "Experiencia Ciudadana",
+            "Recomendador de Zonas WiFi",
             "Buzón Ciudadano",
             "Equidad Digital",
+            "Retorno Social de Conectividad",
             "Agente Operativo",
             "Impacto Ciudadano",
             "Cuadrillas",
@@ -77,6 +79,7 @@ def build_platform_agent_context(
             "Agente Estratégico",
             "Agente Conversacional",
             "Agente Ciudadano",
+            "Vista Pública de Calidad",
             "Validación Humana",
             "Blindaje Técnico",
             "Auditoría Operativa",
@@ -107,11 +110,13 @@ def build_platform_agent_context(
             "audit_events_count": int(len(audit_log_df)),
             "citizen_scores_count": int(len(_safe_dataframe(results.get("citizen_experience_scores")))),
             "citizen_feedback_count": int(len(_safe_dataframe(results.get("citizen_feedback")))),
+            "social_roi_count": int(len(_safe_dataframe(results.get("social_roi_scores")))),
         },
         "top_work_orders": _top_records(work_orders_df, limit=5),
         "top_impact_scores": _top_records(impact_scores_df, limit=5),
         "top_recommendations": _top_records(recommendations_df, limit=5),
         "top_citizen_scores": _top_records(_safe_dataframe(results.get("citizen_experience_scores")), limit=5),
+        "top_social_roi": _top_records(_safe_dataframe(results.get("social_roi_scores")), limit=5),
         "top_operational_mart_rows": _top_records(operational_mart_df, limit=5),
         "top_meraki_anomalies": _top_records(meraki_anomalies_df, limit=5),
         "top_passports": passports[:5],
@@ -163,6 +168,11 @@ def _fallback_platform_answer(question: str, context: dict[str, object]) -> str:
         return (
             "Gemini no está configurado. La capa ciudadana usa datos agregados para recomendar zonas, "
             "mostrar alertas, recibir feedback anónimo y calcular un proxy responsable de equidad digital."
+        )
+    if any(term in lower_question for term in ["retorno social", "social roi", "dane", "sisben", "sisbén"]):
+        return (
+            "Gemini no está configurado. El módulo Retorno Social de Conectividad cruza desempeño WiFi, "
+            "experiencia ciudadana y datos socioeconómicos agregados para priorizar inversión sin usar datos personales."
         )
     if any(term in lower_question for term in ["auditoria", "trazabilidad"]):
         return (

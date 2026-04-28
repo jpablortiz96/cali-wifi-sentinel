@@ -21,6 +21,7 @@ def build_executive_dashboard_summary(results: dict[str, Any], df: pd.DataFrame 
     """Construye un resumen ejecutivo corto sin depender de Gemini."""
     impact_df = _safe_dataframe(results.get("impact_scores"))
     work_orders_df = _safe_dataframe(results.get("work_orders"))
+    social_roi_df = _safe_dataframe(results.get("social_roi_scores"))
     readiness = results.get("readiness", {})
     quality_gate = results.get("quality_gate_report", {})
     limitations = results.get("limitations", [])
@@ -48,18 +49,26 @@ def build_executive_dashboard_summary(results: dict[str, Any], df: pd.DataFrame 
         else "El análisis depende de la calidad del dataset cargado y del mapeo de columnas."
     )
 
+    social_roi_text = ""
+    if not social_roi_df.empty and {"zone_name", "social_roi_score"}.issubset(social_roi_df.columns):
+        social_row = social_roi_df.sort_values("social_roi_score", ascending=False).iloc[0]
+        social_roi_text = (
+            f" La principal prioridad de retorno social aparece en {social_row.get('zone_name')} "
+            f"con score {float(social_row.get('social_roi_score', 0)):.2f}."
+        )
+
     if results.get("is_meraki_mode"):
         return (
             f"Estado general: paquete Meraki activo, readiness {readiness.get('classification', 'Sin clasificar')} "
             f"y quality gate {quality_gate.get('quality_gate', 'Sin evaluar')}. "
-            f"{principal_risk} Recomendación inmediata: revisar el AP o zona priorizada y validar su orden de trabajo. "
+            f"{principal_risk}{social_roi_text} Recomendación inmediata: revisar el AP o zona priorizada y validar su orden de trabajo. "
             f"Limitación principal: {limitation_text}"
         )
 
     return (
         f"Estado general: readiness {readiness.get('classification', 'Sin clasificar')} "
         f"y quality gate {quality_gate.get('quality_gate', 'Sin evaluar')}. "
-        f"{principal_risk} Recomendación inmediata: {recommendation} "
+        f"{principal_risk}{social_roi_text} Recomendación inmediata: {recommendation} "
         f"Limitación principal: {limitation_text}"
     )
 
@@ -68,6 +77,7 @@ def build_top_findings(results: dict[str, Any]) -> list[str]:
     """Resume hallazgos ejecutivos principales."""
     impact_df = _safe_dataframe(results.get("impact_scores"))
     work_orders_df = _safe_dataframe(results.get("work_orders"))
+    social_roi_df = _safe_dataframe(results.get("social_roi_scores"))
     review_df = _safe_dataframe(results.get("human_review_log"))
     quality_gate = results.get("quality_gate_report", {})
 
@@ -93,6 +103,12 @@ def build_top_findings(results: dict[str, Any]) -> list[str]:
         pending = int(review_df["estado_revision"].astype(str).eq("pendiente").sum())
         findings.append(f"La validación humana tiene {pending} órdenes pendientes.")
 
+    if not social_roi_df.empty and {"zone_name", "social_roi_score", "social_roi_label"}.issubset(social_roi_df.columns):
+        social_row = social_roi_df.sort_values("social_roi_score", ascending=False).iloc[0]
+        findings.append(
+            f"La zona con mayor retorno social esperado es {social_row.get('zone_name')} con {float(social_row.get('social_roi_score', 0)):.2f}."
+        )
+
     return findings
 
 
@@ -100,6 +116,7 @@ def build_next_best_actions(results: dict[str, Any]) -> list[str]:
     """Sugiere próximas acciones operativas."""
     impact_df = _safe_dataframe(results.get("impact_scores"))
     work_orders_df = _safe_dataframe(results.get("work_orders"))
+    social_roi_df = _safe_dataframe(results.get("social_roi_scores"))
     readiness = results.get("readiness", {})
     review_df = _safe_dataframe(results.get("human_review_log"))
 
@@ -123,6 +140,9 @@ def build_next_best_actions(results: dict[str, Any]) -> list[str]:
         if pending > 0:
             actions.append("Cerrar la validación humana de las órdenes pendientes.")
 
+    if social_roi_df.empty:
+        actions.append("Cargar indicadores socioeconómicos agregados para calcular Retorno Social de Conectividad.")
+
     actions.append("Exportar el Paquete de Evidencia para compartir hallazgos con operación y tomadores de decisión.")
     return actions
 
@@ -133,6 +153,7 @@ def build_risk_alerts(results: dict[str, Any]) -> list[str]:
     readiness = results.get("readiness", {})
     quality_gate = results.get("quality_gate_report", {})
     impact_df = _safe_dataframe(results.get("impact_scores"))
+    social_roi_df = _safe_dataframe(results.get("social_roi_scores"))
     review_df = _safe_dataframe(results.get("human_review_log"))
 
     gap_text = " ".join(str(item) for item in readiness.get("gaps", []))
@@ -150,6 +171,8 @@ def build_risk_alerts(results: dict[str, Any]) -> list[str]:
         alerts.append("El quality gate está bloqueado; se recomienda corregir datos antes de operar.")
     if readiness.get("score", 0) < 50:
         alerts.append("El readiness score es bajo; el análisis actual tiene limitaciones relevantes.")
+    if social_roi_df.empty:
+        alerts.append("No hay datos socioeconómicos agregados suficientes para estimar retorno social de conectividad.")
 
     if not review_df.empty and "estado_revision" in review_df.columns:
         pending = int(review_df["estado_revision"].astype(str).eq("pendiente").sum())

@@ -66,7 +66,14 @@ def build_recommendation_context(
     decision_passports = results.get("decision_passports", []) if isinstance(results.get("decision_passports"), list) else []
     audit_log = results.get("audit_log", []) if isinstance(results.get("audit_log"), list) else []
     operational_mart_df = _safe_dataframe(results.get("operational_mart"))
+    social_roi_df = _safe_dataframe(results.get("social_roi_scores"))
+    digital_equity_df = _safe_dataframe(results.get("digital_equity_proxy"))
     wifi_package_summary = results.get("wifi_package_summary", {})
+    socioeconomic_validation = (
+        results.get("socioeconomic_validation", {})
+        if isinstance(results.get("socioeconomic_validation"), dict)
+        else {}
+    )
 
     top_scores = []
     if not impact_scores_df.empty and "final_impact_score" in impact_scores_df.columns:
@@ -82,6 +89,13 @@ def build_recommendation_context(
             top_orders = _top_records(work_orders_df.sort_values(sort_column, ascending=False), limit=10)
         else:
             top_orders = _top_records(work_orders_df, limit=10)
+
+    top_social_roi = []
+    if not social_roi_df.empty and "social_roi_score" in social_roi_df.columns:
+        top_social_roi = _top_records(
+            social_roi_df.sort_values("social_roi_score", ascending=False),
+            limit=10,
+        )
 
     osm_summary = {}
     if not osm_context_df.empty:
@@ -136,12 +150,17 @@ def build_recommendation_context(
         missing_data.append("No hay contexto OSM disponible.")
     if weather_context_df.empty:
         missing_data.append("No hay contexto climático disponible.")
+    if social_roi_df.empty:
+        missing_data.append("No hay score de retorno social cargado o calculado.")
+    if not socioeconomic_validation.get("is_valid"):
+        missing_data.append("No hay validación socioeconómica suficiente para orientar inversión social.")
 
     return {
         "trace_id": results.get("trace_id"),
         "confidence_level": results.get("confidence_level", "Baja"),
         "readiness": results.get("readiness", {}),
         "quality_gate_report": results.get("quality_gate_report", {}),
+        "socioeconomic_validation": socioeconomic_validation,
         "schema_mapping": mapped_fields,
         "dataset_summary": {
             "rows": int(len(df)) if isinstance(df, pd.DataFrame) else 0,
@@ -150,6 +169,8 @@ def build_recommendation_context(
         "top_work_orders": top_orders,
         "top_impact_scores": top_scores,
         "top_existing_recommendations": _top_records(recommendations_df, limit=10),
+        "top_social_roi": top_social_roi,
+        "digital_equity_top": _top_records(digital_equity_df, limit=10),
         "osm_context_summary": osm_summary,
         "weather_context_summary": weather_summary,
         "decision_passports_top": decision_passports[:5],
@@ -252,7 +273,29 @@ def generate_deterministic_recommendations_fallback(context: dict[str, object]) 
     recommendations: list[dict[str, object]] = []
     top_scores = context.get("top_impact_scores", []) if isinstance(context.get("top_impact_scores"), list) else []
     top_orders = context.get("top_work_orders", []) if isinstance(context.get("top_work_orders"), list) else []
+    top_social_roi = context.get("top_social_roi", []) if isinstance(context.get("top_social_roi"), list) else []
     missing_data = context.get("missing_data", []) if isinstance(context.get("missing_data"), list) else []
+
+    for row in top_social_roi[:3]:
+        zona = str(row.get("zone_name", row.get("zona", "Zona prioritaria social")))
+        score = float(row.get("social_roi_score", 0) or 0)
+        label = str(row.get("social_roi_label", "Retorno social medio"))
+        recommendations.append(
+            {
+                "zona_o_territorio": zona,
+                "tipo_recomendacion": "inversion",
+                "justificacion": (
+                    f"La zona muestra un Social ROI de {score:.2f} ({label}). "
+                    "Conviene priorizar mejoras no solo por falla técnica sino por retorno social esperado."
+                ),
+                "impacto_estimado": "Alto" if score >= 60 else "Medio",
+                "esfuerzo_estimado": "Medio",
+                "nivel_confianza": context.get("confidence_level", "Baja"),
+                "evidencia_usada": [f"Social ROI {score:.2f}", label],
+                "limitaciones": missing_data[:3],
+                "source": "fallback",
+            }
+        )
 
     for row in top_scores[:5]:
         zona = str(row.get("zona", "Zona prioritaria"))
