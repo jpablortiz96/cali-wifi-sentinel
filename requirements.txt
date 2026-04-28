@@ -1,0 +1,10 @@
+streamlit
+pandas
+openpyxl
+python-dotenv
+google-genai
+xlrd
+requests
+numpy
+plotly
+holidays
